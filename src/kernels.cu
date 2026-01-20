@@ -17,23 +17,23 @@
  * @param cols Number of columns in the matrix.
  * @return The trace (sum of diagonal values) of the matrix.
  */
-#define BLOCKSIZE 1024
-#define WARPSIZE 32
+
 #define FULLMASK 0xffffffff
 
 template <typename T>
-__device__  T BlockReduce(T val)
+__device__ T BlockReduce(T val)
 {
     const int tid = threadIdx.x;
-    const int warpID = tid / WARPSIZE;
-    const int laneID = tid % WARPSIZE;
+    const int warpID = tid / warpSize;
+    const int laneID = tid % warpSize;
 
-    for (size_t offset = WARPSIZE / 2; offset > 0; offset >>= 1)
+    for (size_t offset = warpSize / 2; offset > 0; offset >>= 1)
     {
         val += __shfl_down_sync(FULLMASK, val, offset);
     }
 
-    __shared__ T warp_shared[BLOCKSIZE / WARPSIZE];
+    
+    __shared__ T warp_shared[32];
     if (laneID == 0)
     {
         warp_shared[warpID] = val;
@@ -42,8 +42,11 @@ __device__  T BlockReduce(T val)
 
     if (warpID == 0)
     {
-        val = warp_shared[laneID];
-        for (size_t offset = WARPSIZE / 2; offset > 0; offset >>= 1)
+
+        if (laneID < blockDim.x / warpSize) val = warp_shared[laneID];
+        else val = 0;
+
+        for (size_t offset = warpSize / 2; offset > 0; offset >>= 1)
         {
             val += __shfl_down_sync(FULLMASK, val, offset);
         }
@@ -59,62 +62,64 @@ __global__ void trace_kernel(T* d_input, T* d_output, const size_t N)
     const size_t bid = blockIdx.x;
     const size_t global_id = tid + bid * blockDim.x;
 
-    T sum = 0.f;
+    T sum = (T)0;
     for (size_t i =  global_id; i < N; i += blockDim.x * gridDim.x)
     {
         sum += d_input[i];
     }
 
-    sum = BlockReduce(sum);
+    sum = BlockReduce<T>(sum);
 
     if (tid == 0)
         d_output[bid] = sum;
 
 }
 
-
 template <typename T>
 T trace(const std::vector<T>& h_input, size_t rows, size_t cols) {
-
-    if (rows > cols) rows = cols;
-    else cols = rows;
-
+    // 1. 正常的对角线提取
+    const size_t n_diag = (rows < cols) ? rows : cols;
     std::vector<T> temp;
-    for (int i = 0; i < rows; i++)
-    {
+    temp.reserve(n_diag);
+    for (size_t i = 0; i < n_diag; i++) {
         temp.push_back(h_input[i * cols + i]);
     }
 
-    const size_t num_bytes = sizeof(T) * temp.size();
-    const int N = temp.size();
+    const size_t N = temp.size();
+    const size_t num_bytes = sizeof(T) * N;
 
-    T* d_intput,* d_output;
-    cudaMalloc((void**)&d_intput, num_bytes);
-    cudaMalloc((void**)&d_output, num_bytes);
-    cudaMemcpy(d_intput, temp.data(), num_bytes, cudaMemcpyHostToDevice);
+    // 2. 准备设备内存
+    T *d_input, *d_output;
+    cudaMalloc((void**)&d_input, num_bytes);
     
-    size_t threads = BLOCKSIZE;
-    size_t n = N;
-    size_t blocks = (n + threads - 1) / threads;
-    T* d_in = d_intput;
-    T* d_out = d_output;
+    // 获取硬件属性
+    int deviceID;
+    cudaGetDevice(&deviceID);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, deviceID);
+    size_t threads = prop.maxThreadsPerBlock;
+    size_t blocks = (N + threads - 1) / threads;
 
-    while (blocks > 1)
-    {
-        trace_kernel<T><<<blocks, threads>>>(d_in, d_out, n);
-        cudaDeviceSynchronize();
+    // 输出只需要存下每个 block 的结果
+    cudaMalloc((void**)&d_output, blocks * sizeof(T));
+    cudaMemcpy(d_input, temp.data(), num_bytes, cudaMemcpyHostToDevice);
 
-        n = blocks;
-        blocks = (n + threads - 1) / threads;
-        std::swap(d_in, d_out);
+
+    trace_kernel<T><<<blocks, threads>>>(d_input, d_output, N);
+
+    cudaDeviceSynchronize();
+
+    std::vector<T> h_output(blocks);
+    cudaMemcpy(h_output.data(), d_output, blocks * sizeof(T), cudaMemcpyDeviceToHost);
+
+    T res = (T)0;
+    for (const auto& val : h_output) {
+        res += val;
     }
-    trace_kernel<T><<<1, threads>>>(d_in, d_out, n);
-    T res = 0;
-    cudaMemcpy(&res, d_out, sizeof(T), cudaMemcpyDeviceToHost);
 
+    // 释放资源
+    cudaFree(d_input);
     cudaFree(d_output);
-    cudaFree(d_intput);
-
 
     return res;
 }
