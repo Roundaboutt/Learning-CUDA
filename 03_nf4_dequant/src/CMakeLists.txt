@@ -1,1 +1,0 @@
-add_executable(nf4_kernel nf4_kernel.cu)

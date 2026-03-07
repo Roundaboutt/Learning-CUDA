@@ -1,10 +1,4 @@
-# Python-generated files
+data/qlora_test
+data/cpp_output.bin
+data/py_output.bin
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv

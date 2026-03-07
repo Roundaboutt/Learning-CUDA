@@ -1,6 +1,0 @@
-cmake_minimum_required(VERSION 4.0)
-project(cuda_learn)
-find_package(CUDAToolkit REQUIRED)
-enable_language(CUDA)
-enable_language(CXX)
-add_subdirectory(src)
